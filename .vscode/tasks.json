@@ -1,0 +1,20 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "test: pytest",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "pytest", "tests", "-q", "--ignore=tests/gui_smoke.py"],
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "run: app",
+      "type": "shell",
+      "command": "${workspaceFolder}\\.venv\\Scripts\\pythonw.exe",
+      "args": ["app.pyw"],
+      "problemMatcher": []
+    }
+  ]
+}

@@ -111,6 +111,7 @@ class TaskRow(ctk.CTkFrame):
         on_delete: Callable[[str], None],
         on_edit: Callable[[str, str], bool],
         palette: C.ThemePalette | None = None,
+        text_width: int = TASK_TEXT_WIDTH,
     ) -> None:
         super().__init__(master, fg_color="transparent", corner_radius=10)
         self.task = task
@@ -119,12 +120,13 @@ class TaskRow(ctk.CTkFrame):
         self.on_delete = on_delete
         self.on_edit = on_edit
         self.palette = palette or C.solid_palette()
+        self.text_width = max(C.MIN_TASK_WIDTH, int(text_width))
         self._editing = False
         self._hover = False
         self._hover_after: str | None = None
 
         text_font = ui_font(13, overstrike=task.done)
-        display = wrap_two_lines(task.text, text_font, TASK_TEXT_WIDTH, 2)
+        display = wrap_two_lines(task.text, text_font, self.text_width, 2)
         one_line = line_count(display) <= 1
         self.desired_height = C.TASK_ROW_ONE_LINE if one_line else C.TASK_ROW_TWO_LINE
         self.configure(height=self.desired_height)
@@ -348,8 +350,10 @@ class TaskList(ctk.CTkScrollableFrame):
         on_delete: Callable[[str], None],
         on_edit: Callable[[str, str], bool],
         palette: C.ThemePalette | None = None,
+        text_width: int = TASK_TEXT_WIDTH,
     ) -> None:
         self.palette = palette or C.solid_palette()
+        self.text_width = max(C.MIN_TASK_WIDTH, int(text_width))
         super().__init__(
             master,
             width=1,
@@ -366,6 +370,7 @@ class TaskList(ctk.CTkScrollableFrame):
         self.on_edit = on_edit
         self.rows: list[TaskRow] = []
         self._scrollbar_needed = False
+        self.max_height = C.TASK_AREA_MAX_HEIGHT
 
     def set_palette(self, palette: C.ThemePalette) -> None:
         self.palette = palette
@@ -378,6 +383,23 @@ class TaskList(ctk.CTkScrollableFrame):
             )
         except Exception:
             log.debug("Could not update task list palette", exc_info=True)
+
+    def set_text_width(self, width: int) -> None:
+        self.text_width = max(C.MIN_TASK_WIDTH, int(width))
+
+    def set_max_height(self, height: int) -> None:
+        height = max(1, int(height))
+        if height == self.max_height:
+            return
+        self.max_height = height
+        content_height = sum(row.desired_height + 3 for row in self.rows)
+        visible_height = min(max(1, content_height), self.max_height)
+        try:
+            self.configure(height=visible_height)
+        except Exception:
+            pass
+        self._scrollbar_needed = content_height > self.max_height
+        self._sync_scrollbar()
 
     def rebuild(self, tasks: Sequence[Task], accent: str, *, scroll_to_bottom: bool = False) -> None:
         old_view = 0.0
@@ -402,17 +424,18 @@ class TaskList(ctk.CTkScrollableFrame):
                 on_delete=self.on_delete,
                 on_edit=self.on_edit,
                 palette=self.palette,
+                text_width=self.text_width,
             )
             row.pack(fill="x", pady=(0, 3))
             self.rows.append(row)
 
         content_height = sum(row.desired_height + 3 for row in self.rows)
-        visible_height = min(max(1, content_height), C.TASK_AREA_MAX_HEIGHT)
+        visible_height = min(max(1, content_height), self.max_height)
         try:
             self.configure(height=visible_height)
         except Exception:
             pass
-        self._scrollbar_needed = content_height > C.TASK_AREA_MAX_HEIGHT
+        self._scrollbar_needed = content_height > self.max_height
         self._sync_scrollbar()
         self.after(0, lambda: self._restore_view(old_view, scroll_to_bottom))
 
@@ -605,7 +628,7 @@ class EmptyState(ctk.CTkFrame):
         subtitle.grid(row=2, column=0, pady=(0, 8))
 
         for widget in (self, art, title, subtitle):
-            bind_widget(widget, "<Button-1>", lambda _e: self.on_click())
+            bind_widget(widget, "<Button-1>", lambda _e=None: self.on_click())
             set_cursor(widget, "hand2")
 
 
@@ -636,7 +659,7 @@ class OnboardingTip(ctk.CTkFrame):
         icon.grid(row=0, column=0, padx=(9, 5), pady=8, sticky="n")
         text = ctk.CTkLabel(
             self,
-            text="拖动标题移动，靠近自动拼合；按住 Shift 拖动已拼合的整组。",
+            text="拖动标题移动，靠近自动拼合；Alt 拖动可自由摆放或拆出组合。",
             font=ui_font(10),
             text_color=C.TEXT_MUTED,
             anchor="w",
@@ -749,11 +772,13 @@ class CardHeader(ctk.CTkFrame):
         on_drag_motion: Callable[[Any], None],
         on_drag_end: Callable[[Any], None],
         palette: C.ThemePalette | None = None,
+        title_width: int = TITLE_TEXT_WIDTH,
     ) -> None:
         super().__init__(master, fg_color="transparent", corner_radius=0)
         self.card = card
         self.accent = accent
         self.palette = palette or C.solid_palette()
+        self.title_width = max(C.MIN_TITLE_WIDTH, int(title_width))
         self.on_toggle_pin = on_toggle_pin
         self.on_toggle_collapse = on_toggle_collapse
         self.on_menu = on_menu
@@ -854,7 +879,7 @@ class CardHeader(ctk.CTkFrame):
             self._meta_override = meta_override
             self._meta_accent = False
         if not self._renaming:
-            self._title.configure(text=ellipsize(card.title, ui_font(17, "bold"), TITLE_TEXT_WIDTH))
+            self._title.configure(text=ellipsize(card.title, ui_font(17, "bold"), self.title_width))
         self._dot.configure(text_color=accent)
         self._pin_btn.configure(
             image=get_icon("pin", accent, 15, 1.7, filled=card.pinned)
@@ -896,6 +921,13 @@ class CardHeader(ctk.CTkFrame):
     def set_accent(self, accent: str, card: Card | None = None) -> None:
         self.accent = accent
         self.set_state(card or self.card, accent)
+
+    def set_title_width(self, width: int) -> None:
+        self.title_width = max(C.MIN_TITLE_WIDTH, int(width))
+        if not self._renaming:
+            self._title.configure(
+                text=ellipsize(self.card.title, ui_font(17, "bold"), self.title_width)
+            )
 
     def set_palette(self, palette: C.ThemePalette) -> None:
         self.palette = palette
@@ -1020,6 +1052,14 @@ class CardMenu:
         palette: C.ThemePalette | None = None,
         screen: Any = None,
         on_closed: Callable[[], None] | None = None,
+        on_ungroup: Callable[[], None] | None = None,
+        group_size: int = 0,
+        on_autostart: Callable[[], None] | None = None,
+        autostart_enabled: bool = False,
+        on_glass_level: Callable[[], None] | None = None,
+        glass_level: int = C.DEFAULT_GLASS_LEVEL,
+        on_reset_size: Callable[[], None] | None = None,
+        manual_size: bool = False,
     ) -> None:
         self.card = card
         self.accent = accent
@@ -1034,6 +1074,14 @@ class CardMenu:
         self.on_delete = on_delete
         self.on_quit = on_quit
         self.on_appearance = on_appearance
+        self.on_ungroup = on_ungroup
+        self.group_size = max(0, int(group_size))
+        self.on_autostart = on_autostart
+        self.autostart_enabled = bool(autostart_enabled)
+        self.on_glass_level = on_glass_level
+        self.glass_level = max(0, min(2, int(glass_level)))
+        self.on_reset_size = on_reset_size
+        self.manual_size = bool(manual_size)
         self.appearance = appearance if appearance in C.APPEARANCES else C.DEFAULT_APPEARANCE
         self.palette = palette or C.solid_palette()
         self.top: ctk.CTkToplevel | None = None
@@ -1137,6 +1185,35 @@ class CardMenu:
                 appearance_text,
                 "sparkle",
                 lambda: self._run(self.on_appearance),
+            )
+
+        if self.group_size > 1 and self.on_ungroup is not None:
+            self._item(body, "拆分组合", "grip", lambda: self._run(self.on_ungroup))
+
+        if self.on_glass_level is not None and self.appearance == "glass":
+            level_label = C.GLASS_LEVEL_LABELS[self.glass_level]
+            self._item(
+                body,
+                f"玻璃质感：{level_label}",
+                "sparkle",
+                lambda: self._run(self.on_glass_level),
+            )
+
+        if self.on_autostart is not None:
+            state_text = "已开启" if self.autostart_enabled else "未开启"
+            self._item(
+                body,
+                f"开机自启：{state_text}",
+                "power",
+                lambda: self._run(self.on_autostart),
+            )
+
+        if self.on_reset_size is not None and self.manual_size:
+            self._item(
+                body,
+                "重置卡片大小",
+                "grip",
+                lambda: self._run(self.on_reset_size),
             )
 
         sep2 = ctk.CTkFrame(body, fg_color=self.palette.menu_separator, height=1, corner_radius=0)

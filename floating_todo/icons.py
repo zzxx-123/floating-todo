@@ -77,6 +77,9 @@ def _icon_draw(name: str, draw: ImageDraw.ImageDraw, n: int, color: str, stroke:
         for y in (5, 9, 13):
             for x in (7, 11):
                 dot(x, y, 1.05)
+    elif name == "resize":
+        line([(5.5, 14), (14, 5.5)])
+        line([(9.5, 14), (14, 9.5)])
     elif name == "edit":
         line([(4.2, 13.8), (12.2, 5.8)])
         line([(10.8, 4.4), (13.6, 7.2)])

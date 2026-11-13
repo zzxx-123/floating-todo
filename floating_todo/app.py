@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,11 +12,14 @@ from typing import Any
 import customtkinter as ctk
 
 from . import constants as C
+from . import startup
 from .card_window import CardWindow
+from .layout import LayoutItem, arrange_group
 from .models import AppState, Card
 from .platform_win import (
     ScreenManager,
     SingleInstance,
+    alt_down,
     apply_topmost,
     confirm,
     setup_logging,
@@ -52,6 +56,7 @@ class DragSession:
     alt: bool = False
     shift: bool = False
     moved: bool = False
+    old_group_id: str = ""
 
 
 def data_directory() -> Path:
@@ -100,7 +105,11 @@ class TodoApp:
         self.drag_threshold = max(3, int(round(C.DRAG_START_DISTANCE * self.scale)))
         self.margin = max(8, int(round(C.DEFAULT_MARGIN * self.scale)))
         self.new_offset = max(6, int(round(C.NEW_CARD_OFFSET * self.scale)))
+        self.detach_gap = max(
+            self.snap_gap, int(round((C.CARD_GAP + C.GROUP_DETACH_GAP) * self.scale))
+        )
 
+        self._normalize_groups()
         if self.state.cards and not self.state.onboarding_dismissed:
             self._tip_card_id = self.state.cards[0].id
 
@@ -136,6 +145,8 @@ class TodoApp:
             on_drag_end=lambda event, card_id=card.id: self._drag_end(card_id, event),
             on_tip_dismissed=self._dismiss_onboarding,
             appearance=self.state.appearance,
+            glass_level=self.state.glass_level,
+            on_resized=lambda card_id=card.id: self._on_card_resized(card_id),
         )
         self.windows[card.id] = window
         try:
@@ -190,6 +201,11 @@ class TodoApp:
         self._set_active(card_id)
         window.raise_card()
         card = window.card
+        group_ids = self._group_ids(card_id)
+        try:
+            autostart_enabled = startup.is_enabled()
+        except OSError:
+            autostart_enabled = False
         try:
             menu = CardMenu(
                 self.root,
@@ -204,8 +220,18 @@ class TodoApp:
                 on_quit=self.quit,
                 screen=self.screen,
                 appearance=self.state.appearance,
-                palette=C.theme_palette(self.state.appearance, card.accent),
+                palette=C.theme_palette(
+                    self.state.appearance, card.accent, self.state.glass_level
+                ),
                 on_appearance=self.toggle_appearance,
+                on_ungroup=lambda: self._ungroup(card_id),
+                group_size=len(group_ids),
+                on_autostart=self.toggle_autostart,
+                autostart_enabled=autostart_enabled,
+                on_glass_level=self.cycle_glass_level,
+                glass_level=self.state.glass_level,
+                on_reset_size=window.reset_size,
+                manual_size=bool(card.width or card.height),
             )
             self._menu = menu
             menu.on_closed = lambda: self._forget_menu(menu)
@@ -238,12 +264,181 @@ class TodoApp:
         )
         self.state.appearance = new_appearance
         for window in self.windows.values():
-            window.set_appearance(new_appearance)
+            window.set_appearance(new_appearance, self.state.glass_level)
         target = self.windows.get(self._last_card_id() or "")
         if target is not None:
             label = "彩色玻璃背景" if new_appearance == "glass" else "深色雾面背景"
             target.show_hint(f"已切换为{label}")
         self._schedule_save()
+
+    def cycle_glass_level(self) -> None:
+        if self.state.appearance != "glass":
+            return
+        level = (self.state.glass_level + 1) % len(C.GLASS_LEVELS)
+        self.state.glass_level = level
+        for window in self.windows.values():
+            window.set_appearance("glass", level)
+        target = self.windows.get(self._last_card_id() or "")
+        if target is not None:
+            target.show_hint(f"玻璃质感：{C.GLASS_LEVEL_LABELS[level]}")
+        self._schedule_save()
+
+    def toggle_autostart(self) -> None:
+        try:
+            was_enabled = startup.is_enabled()
+            startup.set_enabled(not was_enabled)
+            now_enabled = startup.is_enabled()
+        except Exception as exc:
+            log.exception("Could not update autostart")
+            show_error(f"设置开机自启失败：{exc}")
+            return
+        if now_enabled == was_enabled:
+            show_error("没有写入开机自启设置，请检查当前用户权限。")
+            return
+        target = self.windows.get(self._last_card_id() or "")
+        if target is not None:
+            target.show_hint("已开启开机自启" if now_enabled else "已关闭开机自启")
+
+    # ------------------------------------------------------------------ groups
+    def _card(self, card_id: str) -> Card | None:
+        for card in self.state.cards:
+            if card.id == card_id:
+                return card
+        return None
+
+    def _group_ids(self, card_id: str) -> tuple[str, ...]:
+        card = self._card(card_id)
+        if card is None or not card.group_id:
+            return (card_id,)
+        members = tuple(
+            item.id
+            for item in self.state.cards
+            if item.group_id == card.group_id and item.id in self.windows
+        )
+        return members if len(members) > 1 else (card_id,)
+
+    def _normalize_groups(self) -> None:
+        counts: dict[str, int] = {}
+        for card in self.state.cards:
+            if card.group_id:
+                counts[card.group_id] = counts.get(card.group_id, 0) + 1
+        for card in self.state.cards:
+            if card.group_id and counts.get(card.group_id, 0) < 2:
+                card.group_id = ""
+
+    def _new_group_id(self) -> str:
+        existing = {card.group_id for card in self.state.cards if card.group_id}
+        while True:
+            candidate = f"g{uuid.uuid4().hex[:8]}"
+            if candidate not in existing:
+                return candidate
+
+    def _assign_group(self, card_ids: tuple[str, ...]) -> str:
+        if len(card_ids) < 2:
+            return ""
+        cards = [self._card(card_id) for card_id in card_ids]
+        cards = [card for card in cards if card is not None]
+        candidate = next((card.group_id for card in cards if card.group_id), "")
+        group_id = candidate or self._new_group_id()
+        for card in cards:
+            card.group_id = group_id
+        self._normalize_groups()
+        return group_id if len(card_ids) > 1 else ""
+
+    def _cluster(self, card_id: str) -> tuple[str, ...]:
+        rects = {cid: item.bounds() for cid, item in self.windows.items()}
+        return tuple(
+            find_group(card_id, rects, self.snap_gap, self.dock_tolerance)
+        )
+
+    def _layout_group(self, group_id: str, *, gap: int | None = None) -> bool:
+        if not group_id:
+            return False
+        cards = [
+            card
+            for card in self.state.cards
+            if card.group_id == group_id and card.id in self.windows
+        ]
+        if len(cards) < 2:
+            return False
+        rects = [self.windows[card.id].bounds() for card in cards]
+        workarea = self.screen.workarea_for_rect(group_bounds(rects))
+        layout = arrange_group(
+            [
+                LayoutItem(
+                    card.id,
+                    int(self.windows[card.id].x),
+                    int(self.windows[card.id].y),
+                    int(self.windows[card.id].width),
+                    int(self.windows[card.id].height),
+                )
+                for card in cards
+            ],
+            workarea,
+            self.snap_gap if gap is None else gap,
+        )
+        for card_id, (x, y) in layout.positions.items():
+            window = self.windows.get(card_id)
+            if window is not None:
+                window.move_to(x, y)
+        return True
+
+    def _layout_group_for_card(self, card_id: str) -> bool:
+        card = self._card(card_id)
+        if card is None or not card.group_id:
+            return False
+        return self._layout_group(card.group_id)
+
+    def _on_card_resized(self, card_id: str) -> None:
+        self._layout_group_for_card(card_id)
+        self._schedule_save()
+
+    def _ungroup(self, card_id: str) -> None:
+        group_ids = self._group_ids(card_id)
+        if len(group_ids) < 2:
+            return
+        cards = [self._card(group_id) for group_id in group_ids]
+        cards = [card for card in cards if card is not None]
+        if len(cards) < 2:
+            return
+        rects = [self.windows[card.id].bounds() for card in cards]
+        workarea = self.screen.workarea_for_rect(group_bounds(rects))
+        layout = arrange_group(
+            [
+                LayoutItem(
+                    card.id,
+                    int(self.windows[card.id].x),
+                    int(self.windows[card.id].y),
+                    int(self.windows[card.id].width),
+                    int(self.windows[card.id].height),
+                )
+                for card in cards
+            ],
+            workarea,
+            self.detach_gap,
+        )
+        for card in cards:
+            card.group_id = ""
+        for member_id, (x, y) in layout.positions.items():
+            window = self.windows.get(member_id)
+            if window is not None:
+                window.move_to(x, y)
+        target = self.windows.get(card_id)
+        if target is not None:
+            target.show_hint("已拆分组合 · 可以自由摆放")
+        self._schedule_save()
+
+    def _auto_group_after_drag(self, card_id: str) -> None:
+        cluster = self._cluster(card_id)
+        if len(cluster) < 2:
+            return
+        group_id = self._assign_group(cluster)
+        if not group_id:
+            return
+        self._layout_group(group_id)
+        target = self.windows.get(card_id)
+        if target is not None:
+            target.show_hint("已自动组合 · 拖动整组移动，Alt 可拆出")
 
     # --------------------------------------------------------------- actions
     def _on_card_changed(self, card_id: str) -> None:
@@ -317,6 +512,7 @@ class TodoApp:
             text = f"确定删除「{card.title}」和它的全部待办吗？\n\n此操作无法撤销。"
         if not confirm(text, "删除卡片"):
             return
+        old_group_id = card.group_id
         self.state.remove_card(card_id)
         try:
             window.destroy()
@@ -325,7 +521,9 @@ class TodoApp:
         self.windows.pop(card_id, None)
         if self._active_id == card_id:
             self._active_id = next(iter(self.windows), None)
-        self._sync_positions()
+        self._normalize_groups()
+        if old_group_id and self._layout_group(old_group_id):
+            self._sync_positions()
         if last or not self.state.cards:
             self.quit()
             return
@@ -461,14 +659,14 @@ class TodoApp:
         except Exception:
             state = 0
         shift = bool(state & SHIFT_MASK)
-        alt = bool(state & ALT_MASK)
-        rects = {cid: item.bounds() for cid, item in self.windows.items()}
-        if shift:
-            group_ids = find_group(card_id, rects, self.snap_gap, self.dock_tolerance)
-        else:
+        alt = alt_down()
+        if alt:
             group_ids = (card_id,)
+        else:
+            group_ids = self._group_ids(card_id)
         if not group_ids:
             group_ids = (card_id,)
+        self._active_id = card_id
         starts: dict[str, tuple[int, int]] = {}
         sizes: dict[str, tuple[int, int]] = {}
         group_rects: list[Rect] = []
@@ -481,6 +679,7 @@ class TodoApp:
             group_rects.append(item.bounds())
         if not starts:
             return
+        card = self._card(card_id)
         self._drag = DragSession(
             card_id=card_id,
             start_pointer=(int(event.x_root), int(event.y_root)),
@@ -490,6 +689,7 @@ class TodoApp:
             bounds=group_bounds(group_rects),
             alt=alt,
             shift=shift,
+            old_group_id=card.group_id if card is not None else "",
         )
 
     def _drag_motion(self, card_id: str, event: Any) -> None:
@@ -562,14 +762,27 @@ class TodoApp:
             return
         self._sync_positions()
         window = self.windows.get(card_id)
-        if window is not None:
-            if len(session.group_ids) > 1:
-                window.show_hint(f"整组 {len(session.group_ids)} 张卡片一起移动")
-            elif not session.alt:
-                rects = {cid: item.bounds() for cid, item in self.windows.items()}
-                group = find_group(card_id, rects, self.snap_gap, self.dock_tolerance)
-                if len(group) > 1:
-                    window.show_hint("已拼合 · 按住 Shift 拖动整组")
+        if session.alt:
+            if session.old_group_id:
+                card = self._card(card_id)
+                if card is not None:
+                    card.group_id = ""
+                self._normalize_groups()
+                if self._layout_group(session.old_group_id):
+                    self._sync_positions()
+                if window is not None:
+                    window.show_hint("已拆出组合 · 自由摆放")
+            self._schedule_save()
+            return
+        if len(session.group_ids) > 1:
+            self._assign_group(session.group_ids)
+            if window is not None:
+                window.show_hint(
+                    f"整组 {len(session.group_ids)} 张卡片一起移动"
+                )
+            self._schedule_save()
+            return
+        self._auto_group_after_drag(card_id)
         self._schedule_save()
 
     # ---------------------------------------------------------------- errors

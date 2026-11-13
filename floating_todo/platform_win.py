@@ -174,6 +174,7 @@ SWP_NOSIZE = 0x0001
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
 VK_LBUTTON = 0x01
+VK_MENU = 0x12
 
 _user32 = ctypes.WinDLL("user32", use_last_error=True)
 _user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
@@ -214,6 +215,18 @@ def left_button_down() -> bool:
     """Return whether the physical left mouse button is currently held."""
     try:
         return bool(_user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
+    except Exception:
+        return False
+
+
+def alt_down() -> bool:
+    """Return whether Alt is physically held.
+
+    Tk on Windows can report a Mod1 bit for synthetic mouse events even when
+    Alt is not held, so modifier detection must consult the keyboard state.
+    """
+    try:
+        return bool(_user32.GetAsyncKeyState(VK_MENU) & 0x8000)
     except Exception:
         return False
 

@@ -17,6 +17,15 @@ LOG_FILE_NAME = "app.log"
 
 # --- dimensions (logical pixels at 100% scaling) -------------------------
 CARD_WIDTH = 372
+CARD_WIDTH_MIN = 300
+CARD_WIDTH_MAX = 560
+CARD_HEIGHT_MIN = 340
+CARD_HEIGHT_MAX = 1200
+RESIZE_HANDLE_SIZE = 18
+TITLE_WIDTH_OVERHEAD = 172
+TASK_WIDTH_OVERHEAD = 122
+MIN_TITLE_WIDTH = 120
+MIN_TASK_WIDTH = 160
 CARD_RADIUS = 22
 CARD_PAD_X = 16
 HEADER_TOP_PAD = 14
@@ -41,7 +50,11 @@ VISIBLE_MARGIN = 10
 # --- appearance ------------------------------------------------------------
 DEFAULT_APPEARANCE = "solid"
 APPEARANCES = ("solid", "glass")
+DEFAULT_GLASS_LEVEL = 1
+GLASS_LEVELS = ("light", "standard", "deep")
+GLASS_LEVEL_LABELS = ("清淡", "标准", "浓郁")
 GLASS_BASE = "#0D121B"
+GROUP_DETACH_GAP = 28  # extra gap added when a group is split manually
 
 # --- limits ----------------------------------------------------------------
 MAX_CARDS = 20
@@ -159,33 +172,45 @@ def solid_palette() -> ThemePalette:
     )
 
 
-def glass_palette(accent_key: str = DEFAULT_ACCENT) -> ThemePalette:
-    """A coloured translucent-looking (but opaque) glass palette."""
+def glass_palette(accent_key: str = DEFAULT_ACCENT, level: int = DEFAULT_GLASS_LEVEL) -> ThemePalette:
+    """A coloured translucent-looking (but opaque) glass palette.
+
+    ``level`` 0/1/2 controls the tint density (清淡/标准/浓郁).
+    """
+    level = max(0, min(2, int(level)))
     accent = accent_color(accent_key)
-    background = mix_color(GLASS_BASE, accent, 0.26)
-    surface = mix_color(background, accent, 0.15)
-    border = mix_color(background, accent, 0.48)
-    menu_bg = mix_color("#0F141D", accent, 0.20)
+    tint = (0.16, 0.26, 0.38)[level]
+    surface_amount = (0.10, 0.15, 0.21)[level]
+    border_amount = (0.34, 0.48, 0.60)[level]
+    menu_amount = (0.14, 0.20, 0.28)[level]
+    background = mix_color(GLASS_BASE, accent, tint)
+    surface = mix_color(background, accent, surface_amount)
+    border = mix_color(background, accent, border_amount)
+    menu_bg = mix_color("#0F141D", accent, menu_amount)
     return ThemePalette(
         card_bg=background,
         card_border=border,
-        card_highlight=mix_color(background, "#FFFFFF", 0.30),
+        card_highlight=mix_color(background, "#FFFFFF", 0.22 + 0.05 * level),
         surface=surface,
         surface_hover=mix_color(surface, "#FFFFFF", 0.055),
         surface_active=mix_color(surface, "#FFFFFF", 0.10),
         border=border,
-        border_strong=mix_color(background, accent, 0.62),
+        border_strong=mix_color(background, accent, 0.55 + 0.07 * level),
         scrollbar_bg=background,
         scrollbar_button=mix_color(background, accent, 0.38),
         scrollbar_button_hover=mix_color(background, accent, 0.62),
         menu_bg=menu_bg,
-        menu_border=mix_color(menu_bg, accent, 0.50),
+        menu_border=mix_color(menu_bg, accent, 0.44 + 0.04 * level),
         menu_hover=mix_color(menu_bg, "#FFFFFF", 0.07),
-        menu_separator=mix_color(menu_bg, accent, 0.28),
+        menu_separator=mix_color(menu_bg, accent, 0.24 + 0.04 * level),
     )
 
 
-def theme_palette(appearance: str, accent_key: str = DEFAULT_ACCENT) -> ThemePalette:
+def theme_palette(
+    appearance: str,
+    accent_key: str = DEFAULT_ACCENT,
+    glass_level: int = DEFAULT_GLASS_LEVEL,
+) -> ThemePalette:
     if appearance == "glass":
-        return glass_palette(accent_key)
+        return glass_palette(accent_key, glass_level)
     return solid_palette()

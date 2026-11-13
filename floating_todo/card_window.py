@@ -10,6 +10,7 @@ from typing import Any, Callable
 import customtkinter as ctk
 
 from . import constants as C
+from .icons import get_icon
 from .models import Card, clean_task_text, clean_title
 from .platform_win import apply_topmost, make_overlay
 from .snapping import Rect
@@ -20,6 +21,8 @@ from .widgets import (
     EmptyState,
     OnboardingTip,
     TaskList,
+    bind_widget,
+    set_cursor,
 )
 
 log = logging.getLogger(__name__)
@@ -42,10 +45,13 @@ class CardWindow:
         on_drag_end: Callable[[Any], None],
         on_tip_dismissed: Callable[[], None],
         appearance: str = C.DEFAULT_APPEARANCE,
+        glass_level: int = C.DEFAULT_GLASS_LEVEL,
+        on_resized: Callable[[], None] | None = None,
     ) -> None:
         self.card = card
         self.appearance = appearance if appearance in C.APPEARANCES else C.DEFAULT_APPEARANCE
-        self.palette = C.theme_palette(self.appearance, card.accent)
+        self.glass_level = max(0, min(2, int(glass_level)))
+        self.palette = C.theme_palette(self.appearance, card.accent, self.glass_level)
         self.screen = screen_manager
         self.on_changed = on_changed
         self.on_menu = on_menu
@@ -53,6 +59,7 @@ class CardWindow:
         self.on_drag_motion = on_drag_motion
         self.on_drag_end = on_drag_end
         self.on_tip_dismissed = on_tip_dismissed
+        self.on_resized = on_resized
         self.on_toggle_task = self._toggle_task
         self.on_delete_task = self._delete_task
         self.on_edit_task = self._edit_task
@@ -61,7 +68,14 @@ class CardWindow:
         self._hint_after: str | None = None
         self._autosize_after: str | None = None
         self._destroyed = False
-        self._logical_height = C.CARD_MIN_HEIGHT
+        self._logical_width = (
+            card.width if card.width else C.CARD_WIDTH
+        )
+        self._logical_height = card.height if card.height else C.CARD_MIN_HEIGHT
+        self._manual_width = bool(card.width)
+        self._manual_height = bool(card.height)
+        self._resizing = False
+        self._resize_origin: tuple[int, int, int, int] | None = None
         self._scale = 1.0
 
         self.top = ctk.CTkToplevel(root)
@@ -72,8 +86,8 @@ class CardWindow:
             self._scale = 1.0
         if self._scale <= 0:
             self._scale = 1.0
-        self.width = max(1, int(round(C.CARD_WIDTH * self._scale)))
-        self.height = max(1, int(round(C.CARD_MIN_HEIGHT * self._scale)))
+        self.width = max(1, int(round(self._logical_width * self._scale)))
+        self.height = max(1, int(round(self._logical_height * self._scale)))
         self.x, self.y = self.screen.ensure_rect_visible(
             int(card.x), int(card.y), self.width, self.height
         )
@@ -96,7 +110,7 @@ class CardWindow:
             corner_radius=C.CARD_RADIUS,
             border_width=1,
             border_color=self.palette.card_border,
-            width=C.CARD_WIDTH,
+            width=self._logical_width,
         )
         self.shell.pack(fill="both", expand=True)
 
@@ -104,6 +118,7 @@ class CardWindow:
         self._build_header()
         self._build_body(show_tip)
         self._build_footer()
+        self._build_resize_handle()
         self._apply_layout()
         self._apply_palette()
         self._render_content()
@@ -113,6 +128,12 @@ class CardWindow:
         self.top.withdraw()
 
     # ------------------------------------------------------------------ build
+    def _title_width(self) -> int:
+        return max(C.MIN_TITLE_WIDTH, self._logical_width - C.TITLE_WIDTH_OVERHEAD)
+
+    def _task_width(self) -> int:
+        return max(C.MIN_TASK_WIDTH, self._logical_width - C.TASK_WIDTH_OVERHEAD)
+
     def _build_header(self) -> None:
         self._header = CardHeader(
             self.shell,
@@ -126,6 +147,7 @@ class CardWindow:
             on_drag_motion=self.on_drag_motion,
             on_drag_end=self.on_drag_end,
             palette=self.palette,
+            title_width=self._title_width(),
         )
 
     def _build_body(self, show_tip: bool) -> None:
@@ -144,6 +166,7 @@ class CardWindow:
             on_delete=self.on_delete_task,
             on_edit=self.on_edit_task,
             palette=self.palette,
+            text_width=self._task_width(),
         )
         self._add_bar = AddTaskBar(
             self.shell, self._accent, self._add_task, palette=self.palette
@@ -152,12 +175,36 @@ class CardWindow:
     def _build_footer(self) -> None:
         self._footer = CardFooter(self.shell, self._accent, palette=self.palette)
 
+    def _build_resize_handle(self) -> None:
+        size = C.RESIZE_HANDLE_SIZE
+        self._grip = ctk.CTkLabel(
+            self.shell,
+            text="",
+            image=get_icon("resize", C.TEXT_DIM, 14, 1.5),
+            width=size,
+            height=size,
+            fg_color=self.palette.card_bg,
+            corner_radius=0,
+        )
+        self._grip.place(relx=1.0, rely=1.0, x=-7, y=-7, anchor="se")
+        set_cursor(self._grip, "size_nwse")
+        bind_widget(self._grip, "<ButtonPress-1>", self._resize_start)
+        bind_widget(self._grip, "<B1-Motion>", self._resize_motion)
+        bind_widget(self._grip, "<ButtonRelease-1>", self._resize_end)
+        self._grip.lift()
+
     # ----------------------------------------------------------------- layout
     def _apply_layout(self) -> None:
         self._header.pack_forget()
         self._body.pack_forget()
         self._add_bar.pack_forget()
         self._footer.pack_forget()
+        grip = getattr(self, "_grip", None)
+        if grip is not None:
+            try:
+                grip.place_forget()
+            except Exception:
+                pass
 
         if self.card.collapsed:
             self._header.pack(fill="x", padx=C.CARD_PAD_X, pady=(14, 14))
@@ -171,6 +218,12 @@ class CardWindow:
             side="bottom", fill="x", padx=C.CARD_PAD_X, pady=(8, 0)
         )
         self._body.pack(fill="both", expand=True, padx=C.CARD_PAD_X)
+        if grip is not None:
+            try:
+                grip.place(relx=1.0, rely=1.0, x=-7, y=-7, anchor="se")
+                grip.lift()
+            except Exception:
+                pass
 
     def _autosize(self) -> None:
         if self._destroyed:
@@ -184,13 +237,18 @@ class CardWindow:
         logical = int(math.ceil(req_height / self._scale)) if req_height > 0 else 1
         if not self.card.collapsed:
             logical = max(C.CARD_MIN_HEIGHT, logical)
-        logical = max(40, min(logical, 1200))
+            if self.card.height:
+                logical = max(C.CARD_HEIGHT_MIN, min(C.CARD_HEIGHT_MAX, int(self.card.height)))
+            else:
+                logical = min(logical, C.CARD_HEIGHT_MAX)
+        else:
+            logical = max(40, min(logical, C.CARD_HEIGHT_MAX))
         self._logical_height = logical
-        self.width = max(1, int(round(C.CARD_WIDTH * self._scale)))
+        self.width = max(1, int(round(self._logical_width * self._scale)))
         self.height = max(1, int(round(logical * self._scale)))
         try:
             self.top.geometry(
-                f"{C.CARD_WIDTH}x{logical}+{int(self.x)}+{int(self.y)}"
+                f"{self._logical_width}x{logical}+{int(self.x)}+{int(self.y)}"
             )
         except Exception:
             log.debug("Card geometry failed", exc_info=True)
@@ -207,6 +265,8 @@ class CardWindow:
                 self.height = actual_h
         except Exception:
             pass
+        if self.card.height and not self.card.collapsed:
+            self._sync_task_viewport()
 
     def _schedule_autosize(self) -> None:
         if self._destroyed or self._autosize_after is not None:
@@ -215,6 +275,107 @@ class CardWindow:
             self._autosize_after = self.top.after(30, self._autosize)
         except Exception:
             self._autosize_after = None
+
+    def _sync_task_viewport(self) -> None:
+        if not self.card.tasks or self.card.collapsed:
+            self._tasks.set_max_height(C.TASK_AREA_MAX_HEIGHT)
+            return
+        try:
+            host_height = self._host.winfo_height()
+        except Exception:
+            return
+        if host_height <= 1:
+            return
+        available = max(1, int((host_height - 2) / self._scale))
+        self._tasks.set_max_height(available)
+
+    def _apply_text_widths(self) -> None:
+        try:
+            self._header.set_title_width(self._title_width())
+            self._tasks.set_text_width(self._task_width())
+        except Exception:
+            log.debug("Could not apply dynamic text widths", exc_info=True)
+
+    # ---------------------------------------------------------------- resizing
+    def _resize_start(self, event: Any) -> None:
+        if self._destroyed or self.card.collapsed:
+            return
+        self._resizing = True
+        self._resize_origin = (
+            int(event.x_root),
+            int(event.y_root),
+            int(self._logical_width),
+            int(self._logical_height),
+        )
+
+    def _resize_motion(self, event: Any) -> None:
+        if not self._resizing or self._resize_origin is None:
+            return
+        start_x, start_y, start_w, start_h = self._resize_origin
+        dx = (int(event.x_root) - start_x) / self._scale
+        dy = (int(event.y_root) - start_y) / self._scale
+        width = max(C.CARD_WIDTH_MIN, min(C.CARD_WIDTH_MAX, int(round(start_w + dx))))
+        height = max(C.CARD_HEIGHT_MIN, min(C.CARD_HEIGHT_MAX, int(round(start_h + dy))))
+        self._apply_size(width, height)
+
+    def _resize_end(self, _event: Any = None) -> None:
+        if not self._resizing:
+            return
+        self._resizing = False
+        self._resize_origin = None
+        self._apply_text_widths()
+        self._render_tasks()
+        self._schedule_autosize()
+        self._finish_resize()
+
+    def _finish_resize(self) -> None:
+        self.on_changed()
+        if self.on_resized is not None:
+            try:
+                self.on_resized()
+            except Exception:
+                log.exception("Card resize callback failed")
+
+    def _apply_size(self, width: int, height: int) -> None:
+        if self._destroyed:
+            return
+        width = max(C.CARD_WIDTH_MIN, min(C.CARD_WIDTH_MAX, int(width)))
+        height = max(C.CARD_HEIGHT_MIN, min(C.CARD_HEIGHT_MAX, int(height)))
+        self._logical_width = width
+        self._logical_height = height
+        self.card.width = width
+        self.card.height = height
+        self.width = max(1, int(round(width * self._scale)))
+        self.height = max(1, int(round(height * self._scale)))
+        try:
+            self.shell.configure(width=width)
+            self.top.geometry(f"{width}x{height}+{int(self.x)}+{int(self.y)}")
+        except Exception:
+            log.debug("Resize geometry failed", exc_info=True)
+        self._apply_text_widths()
+        self._sync_task_viewport()
+
+    def reset_size(self) -> None:
+        if self._destroyed:
+            return
+        self.card.width = 0
+        self.card.height = 0
+        self._logical_width = C.CARD_WIDTH
+        self._manual_width = False
+        self._manual_height = False
+        self._tasks.set_max_height(C.TASK_AREA_MAX_HEIGHT)
+        try:
+            self.shell.configure(width=C.CARD_WIDTH)
+        except Exception:
+            pass
+        self._apply_text_widths()
+        self._render_tasks()
+        self._autosize()
+        # The first geometry pass can run before Tk has recomputed the requested
+        # height of every child; run one more deferred pass to settle on the
+        # real auto height.
+        self._schedule_autosize()
+        self._finish_resize()
 
     def _keep_in_workarea(self) -> None:
         left, top, right, bottom = self.screen.workarea_for_rect(
@@ -449,7 +610,7 @@ class CardWindow:
         accent = C.accent_color(key)
         self.card.accent = key if key in C.ACCENT_BY_KEY else C.DEFAULT_ACCENT
         self._accent = accent
-        self.palette = C.theme_palette(self.appearance, self.card.accent)
+        self.palette = C.theme_palette(self.appearance, self.card.accent, self.glass_level)
         try:
             self._add_bar.set_accent(accent)
             self._footer.update_for(
@@ -464,14 +625,21 @@ class CardWindow:
         self._schedule_autosize()
         self.on_changed()
 
-    def set_appearance(self, appearance: str) -> None:
-        if appearance not in C.APPEARANCES or appearance == self.appearance:
+    def set_appearance(self, appearance: str, glass_level: int | None = None) -> None:
+        new_level = self.glass_level if glass_level is None else max(0, min(2, int(glass_level)))
+        if appearance not in C.APPEARANCES:
+            appearance = C.DEFAULT_APPEARANCE
+        if appearance == self.appearance and new_level == self.glass_level:
             return
         self.appearance = appearance
-        self.palette = C.theme_palette(self.appearance, self.card.accent)
+        self.glass_level = new_level
+        self.palette = C.theme_palette(self.appearance, self.card.accent, self.glass_level)
         self._apply_palette()
         self._render_tasks()
         self._schedule_autosize()
+
+    def set_glass_level(self, level: int) -> None:
+        self.set_appearance(self.appearance, level)
 
     def _apply_palette(self) -> None:
         try:
@@ -500,6 +668,9 @@ class CardWindow:
             self._add_bar.set_palette(self.palette)
             self._footer.set_palette(self.palette)
             self._tasks.set_palette(self.palette)
+            grip = getattr(self, "_grip", None)
+            if grip is not None:
+                grip.configure(fg_color=self.palette.card_bg)
             if self._tip is not None:
                 self._tip.set_palette(self.palette)
         except Exception:

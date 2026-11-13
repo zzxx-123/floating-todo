@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import unittest
 
-from floating_todo.constants import MAX_TASK_LEN, MAX_TASKS_PER_CARD, MAX_TITLE_LEN
+from floating_todo.constants import (
+    MAX_TASK_LEN,
+    MAX_TASKS_PER_CARD,
+    MAX_TITLE_LEN,
+    CARD_HEIGHT_MIN,
+    CARD_WIDTH_MIN,
+)
 from floating_todo.models import AppState, Card, StateFormatError, Task
 
 
@@ -64,7 +70,17 @@ class CardModelTests(unittest.TestCase):
         self.assertEqual(card.accent, "coral")
 
     def test_round_trip(self) -> None:
-        card = Card(title="工作", accent="mint", x=100, y=200, collapsed=True, pinned=False)
+        card = Card(
+            title="工作",
+            accent="mint",
+            x=100,
+            y=200,
+            collapsed=True,
+            pinned=False,
+            group_id="gabc",
+            width=420,
+            height=610,
+        )
         card.add_task("完成报告")
         restored = Card.from_dict(card.to_dict())
         self.assertIsNotNone(restored)
@@ -74,7 +90,14 @@ class CardModelTests(unittest.TestCase):
         self.assertEqual((restored.x, restored.y), (100, 200))
         self.assertTrue(restored.collapsed)
         self.assertFalse(restored.pinned)
+        self.assertEqual(restored.group_id, "gabc")
+        self.assertEqual((restored.width, restored.height), (420, 610))
         self.assertEqual(len(restored.tasks), 1)
+
+    def test_manual_size_is_clamped_or_auto(self) -> None:
+        self.assertEqual(Card(width=0, height=0).width, 0)
+        self.assertEqual(Card(width=1, height=1).width, CARD_WIDTH_MIN)
+        self.assertEqual(Card(width=1, height=1).height, CARD_HEIGHT_MIN)
 
     def test_duplicate_task_ids_are_made_unique(self) -> None:
         raw = {
@@ -134,22 +157,31 @@ class AppStateTests(unittest.TestCase):
 
     def test_v1_state_defaults_to_solid_appearance(self) -> None:
         state = AppState.from_dict({"version": 1, "cards": []})
-        self.assertEqual(state.version, 2)
+        self.assertEqual(state.version, 3)
         self.assertEqual(state.appearance, "solid")
+        self.assertEqual(state.glass_level, 1)
 
     def test_glass_appearance_round_trip(self) -> None:
-        state = AppState(appearance="glass")
+        state = AppState(appearance="glass", glass_level=2)
         state.add_card("玻璃")
         payload = state.to_dict()
         self.assertEqual(payload["appearance"], "glass")
+        self.assertEqual(payload["glass_level"], 2)
         restored = AppState.from_dict(payload)
         self.assertEqual(restored.appearance, "glass")
+        self.assertEqual(restored.glass_level, 2)
 
     def test_unknown_appearance_falls_back_to_solid(self) -> None:
         state = AppState.from_dict(
             {"version": 2, "appearance": "mirror", "cards": []}
         )
         self.assertEqual(state.appearance, "solid")
+
+    def test_unknown_glass_level_falls_back(self) -> None:
+        state = AppState.from_dict(
+            {"version": 3, "appearance": "glass", "glass_level": 9, "cards": []}
+        )
+        self.assertEqual(state.glass_level, 1)
 
 
 if __name__ == "__main__":

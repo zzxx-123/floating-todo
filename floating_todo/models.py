@@ -10,15 +10,21 @@ from typing import Any
 from .constants import (
     ACCENT_BY_KEY,
     APPEARANCES,
+    CARD_HEIGHT_MAX,
+    CARD_HEIGHT_MIN,
+    CARD_WIDTH_MAX,
+    CARD_WIDTH_MIN,
     DEFAULT_ACCENT,
     DEFAULT_APPEARANCE,
+    DEFAULT_GLASS_LEVEL,
+    GLASS_LEVELS,
     MAX_CARDS,
     MAX_TASK_LEN,
     MAX_TASKS_PER_CARD,
     MAX_TITLE_LEN,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class StateFormatError(ValueError):
@@ -62,6 +68,24 @@ def _as_position(value: Any, default: int = 0) -> int:
         number = int(value)
         if -200_000 <= number <= 200_000:
             return number
+    return default
+
+
+def _as_size(value: Any, minimum: int, maximum: int) -> int:
+    """Return 0 for automatic size, otherwise a clamped logical size."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0
+    number = int(value)
+    if number <= 0:
+        return 0
+    return max(minimum, min(maximum, number))
+
+
+def _as_glass_level(value: Any, default: int = DEFAULT_GLASS_LEVEL) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int) and 0 <= value < len(GLASS_LEVELS):
+        return value
     return default
 
 
@@ -118,6 +142,9 @@ class Card:
     collapsed: bool = False
     pinned: bool = True
     tasks: list[Task] = field(default_factory=list)
+    group_id: str = ""
+    width: int = 0
+    height: int = 0
 
     def __post_init__(self) -> None:
         self.title = clean_title(self.title)
@@ -126,6 +153,9 @@ class Card:
         self.x = _as_position(self.x)
         self.y = _as_position(self.y)
         self.tasks = self.tasks[:MAX_TASKS_PER_CARD]
+        self.group_id = self.group_id.strip()[:80] if isinstance(self.group_id, str) else ""
+        self.width = _as_size(self.width, CARD_WIDTH_MIN, CARD_WIDTH_MAX)
+        self.height = _as_size(self.height, CARD_HEIGHT_MIN, CARD_HEIGHT_MAX)
 
     @property
     def completed_count(self) -> int:
@@ -190,6 +220,9 @@ class Card:
             "collapsed": self.collapsed,
             "pinned": self.pinned,
             "tasks": [task.to_dict() for task in self.tasks],
+            "group_id": self.group_id,
+            "width": self.width,
+            "height": self.height,
         }
 
     @classmethod
@@ -222,6 +255,9 @@ class Card:
             collapsed=_as_bool(raw.get("collapsed")),
             pinned=_as_bool(raw.get("pinned"), default=True),
             tasks=tasks,
+            group_id=raw.get("group_id") if isinstance(raw.get("group_id"), str) else "",
+            width=_as_size(raw.get("width"), CARD_WIDTH_MIN, CARD_WIDTH_MAX),
+            height=_as_size(raw.get("height"), CARD_HEIGHT_MIN, CARD_HEIGHT_MAX),
         )
 
 
@@ -230,11 +266,13 @@ class AppState:
     version: int = SCHEMA_VERSION
     onboarding_dismissed: bool = False
     appearance: str = DEFAULT_APPEARANCE
+    glass_level: int = DEFAULT_GLASS_LEVEL
     cards: list[Card] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.appearance not in APPEARANCES:
             self.appearance = DEFAULT_APPEARANCE
+        self.glass_level = _as_glass_level(self.glass_level)
 
     @property
     def card_count(self) -> int:
@@ -265,6 +303,7 @@ class AppState:
             "version": SCHEMA_VERSION,
             "onboarding_dismissed": self.onboarding_dismissed,
             "appearance": self.appearance,
+            "glass_level": self.glass_level,
             "cards": [card.to_dict() for card in self.cards],
         }
 
@@ -280,6 +319,7 @@ class AppState:
         appearance = raw.get("appearance", DEFAULT_APPEARANCE)
         if appearance not in APPEARANCES:
             appearance = DEFAULT_APPEARANCE
+        glass_level = _as_glass_level(raw.get("glass_level", DEFAULT_GLASS_LEVEL))
         raw_cards = raw.get("cards", [])
         if not isinstance(raw_cards, list):
             raise StateFormatError("卡片列表无效")
@@ -299,6 +339,7 @@ class AppState:
             version=SCHEMA_VERSION,
             onboarding_dismissed=_as_bool(raw.get("onboarding_dismissed")),
             appearance=appearance,
+            glass_level=glass_level,
             cards=cards,
         )
 
